@@ -37,16 +37,19 @@ using namespace std;
 
 bool Initialize();
 bool UnInitialize();
-void FillHeader(ICMPheader sendHdr, char **pSendBuffer, int nSequence); 
+SOCKET CreateSocket();
+int SetTTL(SOCKET sock, int ttl);
+void FillHeader(ICMPheader sendHeader, char **sendBuffer);
 int SendICMP(SOCKET sock,
-	char **pSendBuffer,
+	char **sendBuffer,
 	SOCKADDR_IN *destAddr,
-	int nTimeOut,
-	SOCKADDR_IN *remoteAddr,
-	char **pRecvBuffer,
+	int timeOut,
+	SOCKADDR_IN *mediatorAddress,
+	char **receiveBuffer,
 	int *received);
+int GetHostName(SOCKADDR_IN *mediatorAddress, char **hostName);
 
-const int Retries = 3;
+const int MaxRetries = 3;
 
 int main(int argc, char* argv[])
 {
@@ -60,86 +63,93 @@ int main(int argc, char* argv[])
 		return -1;
 	}
 
-	int nSequence = 0;
-	int nTimeOut = 3000;
-	int nHopCount = 30;
+	int sequence = 0;
+	int timeOut = 3000;
+	int maxHops = 30;
 
-	char *pszRemoteIP = NULL, *pszRemoteHost = NULL;
+	char *remoteIP = NULL, *remoteHost = NULL;
 
-	pszRemoteHost = argv[argc - 1];
+	remoteHost = argv[argc - 1];
 
 	for (int i = 1; i < argc - 1; i += 2)
 	{
 		if (strcmp(argv[i], "-h") == 0) 
 		{
-			nHopCount = atoi(argv[i + 1]);
+			maxHops = atoi(argv[i + 1]);
 		}
 		else if (strcmp(argv[i], "-w") == 0)
 		{
-			nTimeOut = atoi(argv[i + 1]);
+			timeOut = atoi(argv[i + 1]);
 		}
 	}
 
-	if (InetHelper::GetIP(pszRemoteHost, &pszRemoteIP) == false)
+	if (InetHelper::GetIP(remoteHost, &remoteIP) == false)
 	{
 		cerr << endl << "Unable to resolve hostname" << endl;
 		return -1;
 	}
 
-	cout << "Tracing route to " << pszRemoteHost << " [" << pszRemoteIP << "] over a maximum of " << nHopCount
-		<< " hops." << endl << endl;
-	int nTTL = 1;
+	cout << "Tracing route to " << remoteHost
+		<< " [" << remoteIP << "] over a maximum of "
+		<< maxHops << " hops." << endl << endl;
 
-	SOCKET sock = socket(AF_INET, SOCK_RAW, IPPROTO_ICMP);
+	int ttl = 1;
+
+	SOCKET sock = CreateSocket();
 
 	SOCKADDR_IN destAddr;
-	destAddr.sin_addr.S_un.S_addr = inet_addr(pszRemoteIP);
 	destAddr.sin_family = AF_INET;
+	destAddr.sin_addr.S_un.S_addr = inet_addr(remoteIP);
 	destAddr.sin_port = rand();
 
-	SOCKADDR_IN remoteAddr;
+	SOCKADDR_IN mediatorAddress;
 
-	ICMPheader sendHdr;
-	sendHdr.nId = htons(rand());
-	sendHdr.byCode = 0;	//ICMP echo and reply messages
-	sendHdr.byType = 8;	//ICMP echo message
+	ICMPheader sendHeader;
+	sendHeader.nId = htons(rand());
+	sendHeader.byCode = 0;	//ICMP echo and reply messages
+	sendHeader.byType = 8;	//ICMP echo message
 
-	int nHopsTraversed = 0;
+	int hopsCount = 0;
 
-	while (nHopsTraversed < nHopCount &&
-		memcmp(&destAddr.sin_addr, &remoteAddr.sin_addr, sizeof(in_addr)) != 0)
+	while (hopsCount < maxHops &&
+		memcmp(&destAddr.sin_addr, &mediatorAddress.sin_addr, sizeof(in_addr)) != 0)
 	{
-		cout << nHopsTraversed + 1;
+		cout << hopsCount + 1;
 
-		char *pSendBuffer = new char[sizeof(ICMPheader)];
+		char *sendBuffer = new char[sizeof(ICMPheader)];
 
-		if (setsockopt(sock, IPPROTO_IP, IP_TTL, (char *)&nTTL, sizeof(nTTL)) == SOCKET_ERROR)
+		if (SetTTL(sock, ttl) == SOCKET_ERROR)
 		{
+			closesocket(sock);
 			UnInitialize();
-			delete[]pSendBuffer;
+			delete[]sendBuffer;
 			return -1;
 		}
 
-		FillHeader(sendHdr, &pSendBuffer, nSequence++);
+		sendHeader.nSequence = htons(sequence++);
+		sendHeader.nChecksum = 0;
 
-		bool bGotAResponse = false;
-		int nRetries = 0;
+		FillHeader(sendHeader, &sendBuffer);
 
-		while (nRetries < Retries)
+		bool responsed = false;
+		int retries = 0;
+
+		while (retries < MaxRetries)
 		{
-			SYSTEMTIME timeSend, timeRecv;
+			SYSTEMTIME timeSend, timeReceived;
 			::GetSystemTime(&timeSend);
 
-			char *pRecvBuffer = new char[1500];
+			char *receiveBuffer = new char[1500];
 
 			int received;
 
-			int sendResult = SendICMP(sock, &pSendBuffer, &destAddr, nTimeOut, &remoteAddr, &pRecvBuffer, &received);
+			int sendResult = SendICMP(sock, &sendBuffer, &destAddr, timeOut, &mediatorAddress, &receiveBuffer, &received);
 			if (sendResult == -1)
 			{
+				closesocket(sock);
 				UnInitialize();
-				delete[]pSendBuffer;
-				delete[]pRecvBuffer;
+				delete[]sendBuffer;
+				delete[]receiveBuffer;
 				return -1;
 			}
 			else if (sendResult == 0)
@@ -148,27 +158,26 @@ int main(int argc, char* argv[])
 			}
 			else
 			{
-				bGotAResponse = true;
+				responsed = true;
 
-				::GetSystemTime(&timeRecv);
+				::GetSystemTime(&timeReceived);
 
-				char *pICMPbuffer = pRecvBuffer + sizeof(IPheader);
-				int nICMPMsgLen = received - sizeof(IPheader);
+				char *ICMPbuffer = receiveBuffer + sizeof(IPheader);
+				int ICMPMessageLength = received - sizeof(IPheader);
 
-				if (InetHelper::IsChecksumValid(pICMPbuffer, nICMPMsgLen))
+				if (InetHelper::IsChecksumValid(ICMPbuffer, ICMPMessageLength))
 				{
-					int nSec = timeRecv.wSecond - timeSend.wSecond;
-					if (nSec < 0)
+					int sec = timeReceived.wSecond - timeSend.wSecond;
+					if (sec < 0)
 					{
-						nSec = nSec + 60;
+						sec = sec + 60;
 					}
 
-					int nMilliSec = abs(timeRecv.wMilliseconds - timeSend.wMilliseconds);
+					int milliSec = abs(timeReceived.wMilliseconds - timeSend.wMilliseconds);
 
-					int nRoundTripTime = 0;
-					nRoundTripTime = abs(nSec * 1000 - nMilliSec);
+					int timePassed = sec * 1000 + milliSec;
 
-					cout << '\t' << nRoundTripTime << " ms";
+					cout << '\t' << timePassed << " ms";
 				}
 				else
 				{
@@ -176,39 +185,36 @@ int main(int argc, char* argv[])
 				}
 			}
 
-			delete[]pRecvBuffer;
+			delete[]receiveBuffer;
 
-			++nRetries;
+			++retries;
 		}
 
-		if (bGotAResponse == false)
+		if (responsed == false)
 		{
 			cout << "\tRequest timed out.";
 		}
 		else
 		{
-			char *pszSrcAddr = inet_ntoa(remoteAddr.sin_addr);
-			char szHostName[NI_MAXHOST];
+			char *sourceAddress = inet_ntoa(mediatorAddress.sin_addr);
+			char *hostName = new char[NI_MAXHOST];
 
-			if (getnameinfo((SOCKADDR*)&remoteAddr,
-				sizeof(SOCKADDR_IN),
-				szHostName,
-				NI_MAXHOST,
-				NULL,
-				0,
-				NI_NUMERICSERV) == SOCKET_ERROR)
+			if (GetHostName(&mediatorAddress, &hostName) == SOCKET_ERROR)
 			{
-				strncpy_s(szHostName, NI_MAXHOST, "Error resolving host name", _TRUNCATE);
+				strncpy_s(hostName, NI_MAXHOST, "Error resolving host name", _TRUNCATE);
 			}
-			cout << '\t' << szHostName << " [" << pszSrcAddr << "]";
+
+			cout << '\t' << hostName << " [" << sourceAddress << "]";
 		}
 
 		cout << endl << '\r';
-		++nHopsTraversed;
-		++nTTL;
+		++hopsCount;
+		++ttl;
 
-		delete[]pSendBuffer;
+		delete[]sendBuffer;
 	}
+
+	closesocket(sock);
 
 	if (UnInitialize() == false)
 	{
@@ -222,18 +228,15 @@ int main(int argc, char* argv[])
 
 bool Initialize()
 {
-	//Initialize WinSock
-	WSADATA wsaData;
+	WSADATA wsa;
 
-	if (WSAStartup(MAKEWORD(2, 2), &wsaData) == SOCKET_ERROR)
+	if (WSAStartup(MAKEWORD(2, 2), &wsa) == SOCKET_ERROR)
 	{
 		return false;
 	}
 
 	SYSTEMTIME time;
 	::GetSystemTime(&time);
-
-	//Seed the random number generator with current millisecond value
 	srand(time.wMilliseconds);
 
 	return true;
@@ -241,7 +244,6 @@ bool Initialize()
 
 bool UnInitialize()
 {
-	//Cleanup
 	if (WSACleanup() == SOCKET_ERROR)
 	{
 		return false;
@@ -250,30 +252,37 @@ bool UnInitialize()
 	return true;
 }
 
-void FillHeader(ICMPheader sendHdr, char **pSendBuffer, int nSequence)
+SOCKET CreateSocket()
 {
-	sendHdr.nSequence = htons(nSequence++);
-	sendHdr.nChecksum = 0;
+	return socket(AF_INET, SOCK_RAW, IPPROTO_ICMP);
+}
 
-	memcpy_s(*pSendBuffer, sizeof(ICMPheader), &sendHdr, sizeof(ICMPheader));
+int SetTTL(SOCKET sock, int ttl)
+{
+	return setsockopt(sock, IPPROTO_IP, IP_TTL, (char *)&ttl, sizeof(ttl));
+}
 
-	sendHdr.nChecksum = htons(InetHelper::GetChecksum(*pSendBuffer, sizeof(ICMPheader)));
+void FillHeader(ICMPheader sendHeader, char **sendBuffer)
+{
+	memcpy_s(*sendBuffer, sizeof(ICMPheader), &sendHeader, sizeof(ICMPheader));
 
-	memcpy_s(*pSendBuffer, sizeof(ICMPheader), &sendHdr, sizeof(ICMPheader));
+	sendHeader.nChecksum = htons(InetHelper::GetChecksum(*sendBuffer, sizeof(ICMPheader)));
+
+	memcpy_s(*sendBuffer, sizeof(ICMPheader), &sendHeader, sizeof(ICMPheader));
 }
 
 int SendICMP(SOCKET sock,
-	char **pSendBuffer, 
+	char **sendBuffer,
 	SOCKADDR_IN *destAddr,
-	int nTimeOut,
-	SOCKADDR_IN *remoteAddr,
-	char **pRecvBuffer,
+	int timeOut,
+	SOCKADDR_IN *mediatorAddress,
+	char **receiveBuffer,
 	int *received)
 {
-	int nResult = sendto(sock, *pSendBuffer, sizeof(ICMPheader), 0, (SOCKADDR *)destAddr,
+	int result = sendto(sock, *sendBuffer, sizeof(ICMPheader), 0, (SOCKADDR *)destAddr,
 		sizeof(SOCKADDR_IN));
 
-	if (nResult == SOCKET_ERROR)
+	if (result == SOCKET_ERROR)
 	{
 		return -1;
 	}
@@ -284,25 +293,25 @@ int SendICMP(SOCKET sock,
 	FD_SET(sock, &fdRead);
 
 	timeval timeInterval = { 0, 0 };
-	timeInterval.tv_usec = nTimeOut * 1000;
+	timeInterval.tv_usec = timeOut * 1000;
 
-	if ((nResult = select(0, &fdRead, NULL, NULL, &timeInterval))
+	if ((result = select(0, &fdRead, NULL, NULL, &timeInterval))
 		== SOCKET_ERROR)
 	{
 		return -1;
 	}
 
-	if (nResult > 0 && FD_ISSET(sock, &fdRead))
+	if (result > 0 && FD_ISSET(sock, &fdRead))
 	{
 		int nRemoteAddrLen = sizeof(SOCKADDR_IN);
-		if ((nResult = recvfrom(sock, *pRecvBuffer, 1500, 0, (SOCKADDR *)remoteAddr, &nRemoteAddrLen))
+		if ((result = recvfrom(sock, *receiveBuffer, 1500, 0, (SOCKADDR *)mediatorAddress, &nRemoteAddrLen))
 			== SOCKET_ERROR)
 		{
 			return -1;
 		}
 		else 
 		{
-			*received = nResult;
+			*received = result;
 			return 1;
 		}
 	}
@@ -310,4 +319,9 @@ int SendICMP(SOCKET sock,
 	{
 		return 0;
 	}
+}
+
+int GetHostName(SOCKADDR_IN *mediatorAddress, char **hostName)
+{
+	return getnameinfo((SOCKADDR*)mediatorAddress, sizeof(SOCKADDR_IN), *hostName, NI_MAXHOST, NULL, 0, NI_NUMERICSERV);
 }
