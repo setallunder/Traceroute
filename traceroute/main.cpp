@@ -35,8 +35,6 @@ struct IPheader
 
 using namespace std;
 
-unsigned short CalcChecksum(char *pBuffer, int nLen);
-bool ValidateChecksum(char *pBuffer, int nLen);
 bool Initialize();
 bool UnInitialize();
 
@@ -136,7 +134,7 @@ int main(int argc, char* argv[])
 		memcpy_s(pSendBuffer, sizeof(ICMPheader), &sendHdr, sizeof(ICMPheader));	//Copy the message header in the buffer
 
 																		//Calculate checksum over ICMP header and message data
-		sendHdr.nChecksum = htons(CalcChecksum(pSendBuffer, sizeof(ICMPheader)));
+		sendHdr.nChecksum = htons(InetHelper::GetChecksum(pSendBuffer, sizeof(ICMPheader)));
 
 		//Copy the message header back into the buffer
 		memcpy_s(pSendBuffer, sizeof(ICMPheader), &sendHdr, sizeof(ICMPheader));
@@ -222,7 +220,7 @@ int main(int argc, char* argv[])
 				recvHdr.nChecksum = ntohs(recvHdr.nChecksum);
 
 				//Check if the checksum is correct
-				if (ValidateChecksum(pICMPbuffer, nICMPMsgLen))
+				if (InetHelper::IsChecksumValid(pICMPbuffer, nICMPMsgLen))
 				{
 					//All's OK
 					int nSec = timeRecv.wSecond - timeSend.wSecond;
@@ -297,66 +295,6 @@ int main(int argc, char* argv[])
 	cout << endl << "Trace complete." << endl;
 
 	return 0;
-}
-
-unsigned short CalcChecksum(char *pBuffer, int nLen)
-{
-	//Checksum for ICMP is calculated in the same way as for
-	//IP header
-
-	//This code was taken from: http://www.netfor2.com/ipsum.htm
-
-	unsigned short nWord;
-	unsigned int nSum = 0;
-	int i;
-
-	//Make 16 bit words out of every two adjacent 8 bit words in the packet
-	//and add them up
-	for (i = 0; i < nLen; i = i + 2)
-	{
-		nWord = ((pBuffer[i] << 8) & 0xFF00) + (pBuffer[i + 1] & 0xFF);
-		nSum = nSum + (unsigned int)nWord;
-	}
-
-	//Take only 16 bits out of the 32 bit sum and add up the carries
-	while (nSum >> 16)
-	{
-		nSum = (nSum & 0xFFFF) + (nSum >> 16);
-	}
-
-	//One's complement the result
-	nSum = ~nSum;
-
-	return ((unsigned short)nSum);
-}
-
-bool ValidateChecksum(char *pBuffer, int nLen)
-{
-	unsigned short nWord;
-	unsigned int nSum = 0;
-	int i;
-
-	//Make 16 bit words out of every two adjacent 8 bit words in the packet
-	//and add them up
-	for (i = 0; i < nLen; i = i + 2)
-	{
-		nWord = ((pBuffer[i] << 8) & 0xFF00) + (pBuffer[i + 1] & 0xFF);
-		nSum = nSum + (unsigned int)nWord;
-	}
-
-	//Take only 16 bits out of the 32 bit sum and add up the carries
-	while (nSum >> 16)
-	{
-		nSum = (nSum & 0xFFFF) + (nSum >> 16);
-	}
-
-	//To validate the checksum on the received message we don't complement the sum
-	//of one's complement
-	//One's complement the result
-	//nSum = ~nSum;
-
-	//The sum of one's complement should be 0xFFFF
-	return ((unsigned short)nSum == 0xFFFF);
 }
 
 bool Initialize()
