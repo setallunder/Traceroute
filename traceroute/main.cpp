@@ -165,7 +165,12 @@ int main(int argc, char* argv[])
 				char *ICMPbuffer = receiveBuffer + sizeof(IPheader);
 				int ICMPMessageLength = received - sizeof(IPheader);
 
-				if (InetHelper::IsChecksumValid(ICMPbuffer, ICMPMessageLength))
+				ICMPheader receivedHeader;
+				memcpy_s(&receivedHeader, sizeof(receivedHeader), ICMPbuffer, sizeof(receivedHeader));
+
+				if (receivedHeader.byType == 11 //Time Exceeded
+					&& receivedHeader.byCode == 0 //TTL expired
+					&& InetHelper::IsChecksumValid(ICMPbuffer, ICMPMessageLength))
 				{
 					int sec = timeReceived.wSecond - timeSend.wSecond;
 					if (sec < 0)
