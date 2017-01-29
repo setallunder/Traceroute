@@ -9,9 +9,9 @@ bool InetHelper::GetIP(char *host, char **address)
 	{
 		if (p->ai_family == AF_INET) 
 		{
-			struct sockaddr_in  *sockaddr_ipv4 = (struct sockaddr_in *) p->ai_addr;
+			struct sockaddr_in  *ipv4 = (struct sockaddr_in *) p->ai_addr;
 			*address = new char[16];
-			inet_ntop(AF_INET, &sockaddr_ipv4->sin_addr, *address, 16);
+			inet_ntop(AF_INET, &ipv4->sin_addr, *address, 16);
 			return true;
 		}
 	}
